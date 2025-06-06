@@ -1,26 +1,89 @@
-@import "tailwindcss";
+@import "bootstrap/dist/css/bootstrap.min.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Custom styles for dark theme */
+.bg-dark {
+  background-color: #1a1a1a !important;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+.bg-secondary {
+  background-color: #2d2d2d !important;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+.text-muted {
+  color: #9ca3af !important;
+}
+
+.border-secondary {
+  border-color: #374151 !important;
+}
+
+/* Chat item hover effects */
+.chat-item:hover {
+  background-color: #374151;
+  border-radius: 8px;
+}
+
+.chat-item:hover .chat-menu-btn {
+  opacity: 1 !important;
+}
+
+/* Button hover effects */
+.btn-link:hover {
+  background-color: #374151 !important;
+  border-radius: 8px;
+}
+
+/* Input placeholder styling */
+.form-control::placeholder {
+  color: #9ca3af;
+}
+
+.form-control:focus {
+  background-color: transparent !important;
+  border-color: #3b82f6 !important;
+  box-shadow: none !important;
+  /* Remove the color: white !important; line */
+}
+
+/* Ensure text is visible in login form */
+.bg-light .form-control,
+.bg-light .form-control:focus {
+  color: #212529 !important;
+}
+
+/* Custom scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1f1f1f;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4a4a4a;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5a5a5a;
+}
+
+/* Ensure mobile viewport */
+@media screen and (max-width: 768px) {
+  html {
+    -webkit-text-size-adjust: 100%;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Bootstrap button customizations for dark theme */
+.btn-outline-light:hover {
+  background-color: #374151 !important;
+  border-color: #6b7280 !important;
+  color: white !important;
+}
+
+.btn-secondary:disabled {
+  background-color: #4b5563 !important;
+  border-color: #4b5563 !important;
 }
