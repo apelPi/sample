@@ -1,70 +1,145 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { trpc } from '../trpc/client';
 import { Plus, Wrench, Mic, ArrowUp } from "lucide-react";
+import type { Message } from "../lib/types";
 
-// Define the message type
-interface Message {
-    role: "user" | "assistant";
-    content: string;
+interface ChatClientProps {
+    user?: any;
+    currentChatId?: string | null;
+    messages?: Message[];
+    loading?: boolean;
+    onSendMessage?: (content: string, role: string) => Promise<void>;
+    isLoggedIn: boolean;
 }
 
-export default function ChatClient() {
+export default function ChatClient({ user, currentChatId, messages, loading, onSendMessage, isLoggedIn }: ChatClientProps) {
     const [message, setMessage] = useState("");
-    const [history, setHistory] = useState<Message[]>([]);
+    const [localMessages, setLocalMessages] = useState<Message[]>([]);
+    const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
+    const [geminiIsTyping, setGeminiIsTyping] = useState(false);
     const geminiMutation = trpc.gemini.useMutation();
     const bottomRef = useRef<HTMLDivElement>(null);
+    const [justCreatedChat, setJustCreatedChat] = useState(false);
+    const chatContainerRef = useRef<HTMLDivElement>(null);
+    const wasAtBottomRef = useRef(true);
+    const prevScrollHeightRef = useRef(0);
 
-    const handleSend = () => {
+    const handleSend = async () => {
         if (!message.trim()) return;
-        const newHistory: Message[] = [
-            ...history,
-            { role: "user", content: message }
-        ];
-        geminiMutation.mutate({ history: newHistory });
-        setHistory(newHistory);
         setMessage("");
+        const userMsg: Message = { role: "user", content: message };
+        if (isLoggedIn && onSendMessage) {
+            setPendingMessages((prev) => [...prev, userMsg]);
+            setGeminiIsTyping(true);
+            if (!currentChatId) setJustCreatedChat(true);
+            await onSendMessage(message, "user");
+            const newHistory = [
+                ...(messages ?? []),
+                ...pendingMessages,
+                userMsg
+            ];
+            geminiMutation.mutate({ history: newHistory });
+        } else {
+            setLocalMessages((prev) => [...prev, userMsg]);
+            setPendingMessages((prev) => [...prev, userMsg]);
+            setGeminiIsTyping(true);
+            const newHistory = [
+                ...localMessages,
+                ...pendingMessages,
+                userMsg
+            ];
+            geminiMutation.mutate({ history: newHistory });
+        }
     };
 
     useEffect(() => {
         if (geminiMutation.data) {
-            setHistory((prev) => {
-                // Only append assistant message if the last message is from the user
-                if (prev.length === 0 || prev[prev.length - 1].role !== 'assistant') {
-                    return [
-                        ...prev,
-                        { role: "assistant", content: geminiMutation.data.response ?? "" }
-                    ];
+            if (isLoggedIn && onSendMessage) {
+                if (geminiMutation.data.response) {
+                    onSendMessage(geminiMutation.data.response, "assistant");
                 }
-                return prev;
-            });
+            } else {
+                if (geminiMutation.data.response) {
+                    setLocalMessages((prev) => [...prev, { role: "assistant", content: geminiMutation.data.response ?? "" }]);
+                }
+            }
+            setPendingMessages([]);
+            setGeminiIsTyping(false);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [geminiMutation.data]);
 
     useEffect(() => {
+        if (isLoggedIn && messages && pendingMessages.length > 0) {
+            const lastPending = pendingMessages[pendingMessages.length - 1];
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg && lastPending && lastMsg.content === lastPending.content && lastMsg.role === lastPending.role) {
+                setPendingMessages([]);
+                setJustCreatedChat(false);
+            }
+        }
+    }, [messages, pendingMessages, isLoggedIn]);
+
+    useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [history, geminiMutation.isPending]);
+    }, [messages, localMessages, pendingMessages, geminiIsTyping, geminiMutation.isPending]);
+
+    // Compose the display messages
+    let displayMessages: Message[] = [];
+    if (isLoggedIn) {
+        displayMessages = [...(messages ?? []), ...pendingMessages];
+    } else {
+        displayMessages = [...localMessages, ...pendingMessages];
+    }
+
+    // BEFORE messages change: record scroll position and scroll height
+    useLayoutEffect(() => {
+        const el = chatContainerRef.current;
+        if (!el) return;
+        wasAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        prevScrollHeightRef.current = el.scrollHeight;
+        // This effect should run before displayMessages changes
+    }, [messages, localMessages, pendingMessages, geminiIsTyping]);
+
+    // AFTER messages change: restore scroll position
+    useLayoutEffect(() => {
+        const el = chatContainerRef.current;
+        if (!el) return;
+        if (wasAtBottomRef.current) {
+            el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+        } else {
+            const diff = el.scrollHeight - prevScrollHeightRef.current;
+            el.scrollTop += diff;
+        }
+        // This effect should run after displayMessages changes
+    }, [displayMessages.length, geminiIsTyping]);
+
+    // Only show loading when switching to an existing chat, not when sending the first message
+    const showLoading = loading && isLoggedIn && currentChatId && (messages?.length ?? 0) === 0 && !justCreatedChat;
 
     return (
         <div className="d-flex flex-column h-100 position-relative" style={{ minHeight: '100vh', background: '#18181a' }}>
             {/* Main Content */}
             <div
-                className="flex-grow-1 px-2 pb-0 overflow-auto"
+                ref={chatContainerRef}
+                className="flex-grow-1 px-2 overflow-auto"
                 style={{
-                    marginBottom: 0,
-                    paddingBottom: 70, // for input bar
+                    paddingBottom: 80, // slightly more than input bar height
                     paddingTop: 56,    // match header height
                     height: '100%',
                 }}
             >
                 {/* Always render chat history */}
                 <div className="d-flex flex-column gap-2 py-2">
-                    {history.length === 0 && !geminiMutation.isPending ? (
+                    {showLoading ? (
+                        <div className="text-center text-muted py-2">Loading messages...</div>
+                    ) : displayMessages.length === 0 && !geminiIsTyping ? (
                         <h2 className="display-6 fw-light text-center lh-base text-white" style={{marginTop: '30%'}}>What's on the agenda today?</h2>
                     ) : null}
-                    {history.map((msg, idx) => (
+                    {displayMessages.map((msg, idx) => (
                         msg.role === 'user' ? (
-                            <div key={idx} className="d-flex justify-content-end align-items-start gap-2 mb-1 w-100">
+                            <div key={msg.id ?? idx} className="d-flex justify-content-end align-items-start gap-2 mb-1 w-100">
                                 <div
                                     className="rounded-pill px-4 py-2"
                                     style={{
@@ -81,7 +156,7 @@ export default function ChatClient() {
                                 </div>
                             </div>
                         ) : (
-                            <div key={idx} className="d-flex flex-column w-100 mb-2">
+                            <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
                                 <div
                                     className="rounded-4 px-4 py-3 w-100"
                                     style={{
@@ -97,7 +172,7 @@ export default function ChatClient() {
                             </div>
                         )
                     ))}
-                    {geminiMutation.isPending && (
+                    {geminiIsTyping && (
                         <div className="d-flex flex-column w-100 mb-2">
                             <div className="rounded-4 px-4 py-3 w-100 opacity-50" style={{fontSize: '1rem', background: '#26272b', color: '#fff', borderRadius: 18, minHeight: 48}}>
                                 Gemini is typing...

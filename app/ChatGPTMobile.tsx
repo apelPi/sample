@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Menu,
   RotateCcw,
@@ -16,6 +16,9 @@ import {
   User,
 } from "lucide-react";
 import ChatClient from './chat-client';
+import { supabase } from "../lib/supabase";
+import type { Message } from "../lib/types";
+import { trpc } from '../trpc/client';
 
 interface Auth0User {
   name?: string;
@@ -29,9 +32,61 @@ interface ChatGPTMobileProps {
   isLoggedIn: boolean;
 }
 
+interface Chat {
+  id: string;
+  title: string;
+  created_at: string;
+}
+
 export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showLogout, setShowLogout] = useState(false);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loadingChats, setLoadingChats] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+
+  const geminiTitleMutation = trpc.geminiTitle.useMutation();
+
+  useEffect(() => {
+    if (isLoggedIn && user?.sub) {
+      setLoadingChats(true);
+      supabase
+        .from('chats')
+        .select('*')
+        .eq('user_id', user.sub)
+        .order('created_at', { ascending: false })
+        .then(({ data, error }) => {
+          setLoadingChats(false);
+          if (!error && data) setChats(data);
+        });
+    }
+  }, [isLoggedIn, user?.sub]);
+
+  useEffect(() => {
+    if (currentChatId) {
+      setLoadingMessages(true);
+      supabase
+        .from('messages')
+        .select('*')
+        .eq('chat_id', currentChatId)
+        .order('created_at', { ascending: true })
+        .then(({ data, error }) => {
+          setLoadingMessages(false);
+          if (!error && data) {
+            setMessages(
+              data.map((msg: any) => ({
+                ...msg,
+                role: msg.role === "user" ? "user" : "assistant"
+              }))
+            );
+          }
+        });
+    } else {
+      setMessages([]);
+    }
+  }, [currentChatId]);
 
   const handleLogout = () => {
     window.location.href = '/auth/logout';
@@ -39,6 +94,49 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
 
   const handleLogin = () => {
     window.location.href = '/auth/login';
+  };
+
+  const handleNewChat = () => {
+    setCurrentChatId(null);
+    setMessages([]);
+    setSidebarOpen(false);
+  };
+
+  const handleSendMessage = async (content: string, role: string) => {
+    if (!user?.sub) return;
+    let chatId = currentChatId;
+    let isNewChat = false;
+    if (!chatId) {
+      const { data, error } = await supabase
+        .from('chats')
+        .insert([{ user_id: user.sub, title: 'New Chat' }])
+        .select()
+        .single();
+      if (!error && data) {
+        setChats([data, ...chats]);
+        setCurrentChatId(data.id);
+        chatId = data.id;
+        isNewChat = true;
+      } else {
+        return;
+      }
+    }
+    const { data: msgData, error: msgError } = await supabase
+      .from('messages')
+      .insert([{ chat_id: chatId, user_id: user.sub, content, role }])
+      .select()
+      .single();
+    if (!msgError && msgData) {
+      setMessages((prev) => [...prev, msgData]);
+    }
+    if (isNewChat && role === 'user') {
+      const prompt = `Provide just one(maximum 3 words) concise title for this chat based on the following message: "${content}"`;
+      const { title } = await geminiTitleMutation.mutateAsync({ prompt });
+      if (title) {
+        await supabase.from('chats').update({ title }).eq('id', chatId);
+        setChats((prev) => prev.map((chat) => chat.id === chatId ? { ...chat, title } : chat));
+      }
+    }
   };
 
   return (
@@ -98,8 +196,24 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
                 <X size={24} />
               </button>
             </div>
-            {/* Sidebar Content (empty for now) */}
-            <div className="flex-grow-1"></div>
+            {/* Sidebar Content: Chat List */}
+            <div className="flex-grow-1 overflow-auto">
+              <button className="btn btn-primary w-100 my-2" onClick={handleNewChat}>+ New Chat</button>
+              {loadingChats ? (
+                <div className="text-center text-muted py-2">Loading chats...</div>
+              ) : (
+                chats.map(chat => (
+                  <div
+                    key={chat.id}
+                    className={`px-3 py-2 ${chat.id === currentChatId ? 'bg-secondary text-white' : 'text-white'}`}
+                    style={{ cursor: 'pointer', borderRadius: 8, marginBottom: 4, background: chat.id === currentChatId ? '#232325' : 'transparent' }}
+                    onClick={() => { setCurrentChatId(chat.id); setSidebarOpen(false); }}
+                  >
+                    {chat.title || 'Untitled Chat'}
+                  </div>
+                ))
+              )}
+            </div>
             {/* Sidebar Footer - Profile */}
             <div className="p-3 border-top" style={{ borderColor: '#232325' }}>
               <div
@@ -139,7 +253,18 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
           overflow: 'hidden',
         }}
       >
-        <ChatClient />
+        {isLoggedIn ? (
+          <ChatClient
+            user={user}
+            currentChatId={currentChatId}
+            messages={messages}
+            loading={loadingMessages}
+            onSendMessage={handleSendMessage}
+            isLoggedIn={true}
+          />
+        ) : (
+          <ChatClient isLoggedIn={false} />
+        )}
       </div>
     </div>
   );

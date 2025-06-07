@@ -24,6 +24,19 @@ export const appRouter = createTRPCRouter({
       // Adjust this depending on the actual response structure
       return { response: response.text };
     }),
+  geminiTitle: baseProcedure
+    .input(z.object({ prompt: z.string() }))
+    .mutation(async ({ input }) => {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: [
+          { role: 'user', parts: [{ text: input.prompt }] }
+        ],
+      });
+      // Return the title as plain text
+      return { title: response.text };
+    }),
 });
 
 export type AppRouter = typeof appRouter; 
