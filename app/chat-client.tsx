@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { trpc } from '../trpc/client';
-import { Plus, Wrench, Mic, ArrowUp, Image as ImageIcon } from "lucide-react";
+import { Plus, ArrowUp, Image as ImageIcon } from "lucide-react";
 // Extend Message type locally to allow imageBase64 for local (logged-out) image messages
 import type { Message as BaseMessage } from "../lib/types";
 
@@ -12,7 +12,7 @@ interface ChatClientProps {
     currentChatId?: string | null;
     messages?: Message[];
     loading?: boolean;
-    onSendMessage?: (content: string, role: string) => Promise<void>;
+    onSendMessage?: (content: string, role: string, imageBase64?: string, isImagePrompt?: boolean) => Promise<void>;
     isLoggedIn: boolean;
 }
 
@@ -34,6 +34,22 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
         if (!message.trim()) return;
         setMessage("");
         const userMsg: Message = { role: "user", content: message };
+        // IMAGE GENERATION FLOW - LOGGED IN
+        if (isLoggedIn && imageMode && onSendMessage) {
+            setGeminiIsTyping(true);
+            // Insert user message as image prompt
+            await onSendMessage(message, "user", undefined, true);
+            try {
+                await generateImageMutation.mutateAsync({ prompt: message });
+                // Do NOT call onSendMessage for assistant image or error; parent handles it.
+            } catch (err) {
+                // Parent handles error message as well
+            }
+            setGeminiIsTyping(false);
+            setImageMode(false);
+            return;
+        }
+        // IMAGE GENERATION FLOW - LOGGED OUT
         if (!isLoggedIn && imageMode) {
             const imagePromptMsg: Message = { ...userMsg, isImagePrompt: true } as Message;
             setLocalMessages((prev) => [...prev, imagePromptMsg]);
@@ -56,7 +72,7 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
         }
         // Normal text flow
         if (isLoggedIn && onSendMessage) {
-            setPendingMessages((prev) => [...prev, userMsg]);
+            // setPendingMessages((prev) => [...prev, userMsg]); // Disabled for logged-in users
             setGeminiIsTyping(true);
             if (!currentChatId) setJustCreatedChat(true);
             await onSendMessage(message, "user");
@@ -65,10 +81,10 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                 ...(messages ?? []),
                 ...pendingMessages,
                 userMsg
-            ].filter(msg => !msg.imageBase64 && msg.content !== "[image]" && !(msg as any).isImagePrompt);
+            ].filter(msg => !msg.imageBase64 && msg.content !== "[image]" && (msg as any).isImagePrompt !== true && (msg as any).is_image_prompt !== true);
             geminiMutation.mutate({ history: newHistory });
         } else {
-            setPendingMessages((prev) => [...prev, userMsg]);
+            setLocalMessages((prev) => [...prev, userMsg]);
             setGeminiIsTyping(true);
             // Filter out image requests and image responses from context
             const newHistory = [
@@ -116,10 +132,24 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, localMessages, pendingMessages, geminiIsTyping, geminiMutation.isPending]);
 
+    // Debug: Log messages prop
+    console.log("Messages prop received by ChatClient:", messages);
     // Compose the display messages
     let displayMessages: Message[] = [];
     if (isLoggedIn) {
-        displayMessages = [...(messages ?? []), ...pendingMessages];
+        displayMessages = [...(messages ?? [])];
+        // Deduplicate user image prompts: only show the latest for each unique content
+        const seen = new Set<string>();
+        displayMessages = displayMessages.filter((msg, idx, arr) => {
+            if (msg.role === 'user' && (msg as any).isImagePrompt) {
+                const key = msg.content + '__' + msg.role + '__' + (msg as any).isImagePrompt;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                // Only keep the last occurrence
+                return arr.findLastIndex(m => (m.content + '__' + m.role + '__' + (m as any).isImagePrompt) === key) === idx;
+            }
+            return true;
+        });
     } else {
         displayMessages = [...localMessages, ...pendingMessages];
     }
@@ -168,68 +198,71 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                     ) : displayMessages.length === 0 && !geminiIsTyping ? (
                         <h2 className="display-6 fw-light text-center lh-base text-white" style={{marginTop: '30%'}}>What's on the agenda today?</h2>
                     ) : null}
-                    {displayMessages.map((msg, idx) => (
-                        msg.role === 'user' ? (
-                            <div key={msg.id ?? idx} className="d-flex justify-content-end align-items-start gap-2 mb-1 w-100">
-                                <div
-                                    className="rounded-pill px-4 py-2"
-                                    style={{
-                                        maxWidth: '80%',
-                                        fontSize: '1rem',
-                                        wordBreak: 'break-word',
-                                        borderRadius: 24,
-                                        background: '#232325',
-                                        color: '#fff',
-                                        textAlign: 'right',
-                                    }}
-                                >
-                                    {msg.content}
+                    {displayMessages.map((msg, idx) => {
+                        if (msg.role === 'user') {
+                            return (
+                                <div key={msg.id ?? idx} className="d-flex justify-content-end align-items-start gap-2 mb-1 w-100">
+                                    <div
+                                        className="rounded-pill px-4 py-2"
+                                        style={{
+                                            maxWidth: '80%',
+                                            fontSize: '1rem',
+                                            wordBreak: 'break-word',
+                                            borderRadius: 24,
+                                            background: '#232325',
+                                            color: '#fff',
+                                            textAlign: 'right',
+                                        }}
+                                    >
+                                        {msg.content}
+                                    </div>
                                 </div>
-                            </div>
-                        ) : msg.imageBase64 ? (
-                            <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
-                                <div
-                                    className="rounded-4 px-4 py-3 w-100 d-flex justify-content-center"
-                                    style={{
-                                        fontSize: '1rem',
-                                        background: '#26272b',
-                                        color: '#fff',
-                                        borderRadius: 18,
-                                        minHeight: 48,
-                                    }}
-                                >
-                                    <img src={`data:image/png;base64,${msg.imageBase64}`} alt="Generated" style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 12 }} />
+                            );
+                        } else if (msg.content === '[image]' && msg.imageBase64) {
+                            return (
+                                <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
+                                    <div
+                                        className="rounded-4 px-4 py-3 w-100 d-flex justify-content-center"
+                                        style={{
+                                            fontSize: '1rem',
+                                            background: '#26272b',
+                                            color: '#fff',
+                                            borderRadius: 18,
+                                            minHeight: 48,
+                                        }}
+                                    >
+                                        <img src={`data:image/png;base64,${msg.imageBase64}`} alt="Generated" style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 12 }} />
+                                    </div>
                                 </div>
-                            </div>
-                        ) : (
-                            <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
-                                <div
-                                    className="rounded-4 px-4 py-3 w-100"
-                                    style={{
-                                        fontSize: '1rem',
-                                        background: '#26272b',
-                                        color: '#fff',
-                                        borderRadius: 18,
-                                        minHeight: 48,
-                                    }}
-                                >
-                                    {msg.content}
+                            );
+                        } else {
+                            return (
+                                <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
+                                    <div
+                                        className="rounded-4 px-4 py-3 w-100"
+                                        style={{
+                                            fontSize: '1rem',
+                                            background: '#26272b',
+                                            color: '#fff',
+                                            borderRadius: 18,
+                                            minHeight: 48,
+                                        }}
+                                    >
+                                        {msg.content}
+                                    </div>
                                 </div>
-                            </div>
-                        )
-                    ))}
-                    {geminiIsTyping && (
+                            );
+                        }
+                    })}
+                    {(imageMode && geminiIsTyping) || geminiIsTyping ? (
                         <div className="d-flex flex-column w-100 mb-2">
                             <div className="rounded-4 px-4 py-3 w-100 opacity-50" style={{fontSize: '1rem', background: '#26272b', color: '#fff', borderRadius: 18, minHeight: 48}}>
                                 {imageMode ? "Generating image..." : "Gemini is typing..."}
                             </div>
                         </div>
-                    )}
-                    <div ref={bottomRef} />
+                    ) : null}
                 </div>
-                {geminiMutation.error && (
-                    <div style={{ color: 'red' }}>Error: {geminiMutation.error.message}</div>
-                )}
+                <div ref={bottomRef} />
             </div>
             {/* Input Section - fixed to bottom */}
             <div className="fixed-bottom w-100" style={{background: '#18181a', zIndex: 100, boxShadow: '0 -2px 8px rgba(0,0,0,0.2)'}}>
@@ -258,12 +291,7 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                             >
                                 <ImageIcon size={20} />
                             </button>
-                            <div className="d-flex align-items-center gap-2 text-muted">
-                                <Wrench size={16} />
-                            </div>
-                            <button className="btn btn-link text-muted p-2" style={{ border: "none" }}>
-                                <Mic size={20} />
-                            </button>
+
                             <button
                                 className="btn btn-secondary rounded-circle d-flex align-items-center justify-content-center"
                                 style={{ width: "36px", height: "36px", background: '#4f4f51', border: 'none' }}

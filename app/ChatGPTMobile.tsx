@@ -48,6 +48,7 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
   const [loadingMessages, setLoadingMessages] = useState(false);
 
   const geminiTitleMutation = trpc.geminiTitle.useMutation();
+  const generateImage = trpc.generateImage.useMutation();
 
   useEffect(() => {
     if (isLoggedIn && user?.sub) {
@@ -75,12 +76,24 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
         .then(({ data, error }) => {
           setLoadingMessages(false);
           if (!error && data) {
-            setMessages(
-              data.map((msg: any) => ({
-                ...msg,
-                role: msg.role === "user" ? "user" : "assistant"
-              }))
+            console.log('[fetchAndSetMessages] Fetching messages for chat', currentChatId);
+            const mapped = data.map((msg: any) => ({
+              ...msg,
+              role: msg.role === "user" ? "user" : "assistant",
+              imageBase64: msg.image_base64 ?? undefined,
+              isImagePrompt: msg.is_image_prompt ?? false
+            }));
+            console.log('[fetchAndSetMessages] Setting messages:', mapped);
+            const deduped = mapped.filter((msg, idx, arr) =>
+              idx === arr.findIndex(m =>
+                m.content === msg.content &&
+                m.role === msg.role &&
+                m.isImagePrompt === msg.isImagePrompt &&
+                m.chat_id === msg.chat_id
+              )
             );
+            setMessages(deduped);
+            console.log('[fetchAndSetMessages] setMessages(deduped):', deduped);
           }
         });
     } else {
@@ -102,7 +115,33 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
     setSidebarOpen(false);
   };
 
-  const handleSendMessage = async (content: string, role: string) => {
+  // Helper to fetch all messages for the current chat and update state
+  const fetchAndSetMessages = async (chatId: string) => {
+    console.log('[fetchAndSetMessages] Fetching messages for chat', chatId);
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('chat_id', chatId)
+      .order('created_at', { ascending: true });
+    if (!error && data) {
+      // Only keep [image] messages if they have imageBase64
+      const mapped = data
+        .filter((msg: any) => !(msg.content === '[image]' && !msg.image_base64))
+        .map((msg: any) => ({
+          ...msg,
+          role: msg.role === "user" ? "user" : "assistant",
+          imageBase64: msg.image_base64 ?? undefined,
+          isImagePrompt: msg.is_image_prompt ?? false
+        }));
+      console.log('[fetchAndSetMessages] Setting messages:', mapped);
+      setMessages(mapped);
+    }
+  };
+
+
+  const [isImageGenerating, setIsImageGenerating] = useState(false);
+  const handleSendMessage = async (content: string, role: string, imageBase64?: string, isImagePrompt?: boolean) => {
+  console.log('[handleSendMessage] called with:', { content, role, imageBase64, isImagePrompt });
     if (!user?.sub) return;
     let chatId = currentChatId;
     let isNewChat = false;
@@ -121,9 +160,74 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
         return;
       }
     }
+    // IMAGE GENERATION FLOW
+    if (isImagePrompt) {
+      // 1. Insert user prompt as image prompt
+      console.log('[handleSendMessage] Inserting user image prompt', { chatId, content });
+      const { data: promptMsg, error: promptErr } = await supabase
+        .from('messages')
+        .insert([{ chat_id: chatId, user_id: user.sub, content, role, image_base64: null, is_image_prompt: true }])
+        .select()
+        .single();
+      console.log('[handleSendMessage] Supabase insert result for user image prompt:', { promptMsg, promptErr });
+      if (!promptErr && promptMsg) {
+        console.log('[handleSendMessage] Inserted user image prompt', promptMsg);
+        // Do NOT setMessages optimistically here. Only update messages via fetchAndSetMessages after insert.
+        await fetchAndSetMessages(chatId!);
+      }
+      setIsImageGenerating(true); // Start loading indicator
+      // 2. Call Gemini image API
+      try {
+        console.log('[handleSendMessage] Calling Gemini image API', { prompt: content });
+        await new Promise<void>((resolve, reject) => {
+          generateImage.mutate(
+            { prompt: content },
+            {
+              onSuccess: async (data: { imageBase64: string }) => {
+                console.log('[handleSendMessage] Gemini image API returned', { imageBase64: data.imageBase64 });
+                // 3. Insert assistant image response with image_base64
+                console.log('[handleSendMessage] Inserting assistant image message to Supabase', { chatId, imageBase64: data.imageBase64 });
+                const { data: imageMsg, error: imageErr } = await supabase
+                  .from('messages')
+                  .insert([{ chat_id: chatId!, user_id: user.sub, content: '[image]', role: 'assistant', image_base64: data.imageBase64, is_image_prompt: false }])
+                  .select()
+                  .single();
+                console.log('[handleSendMessage] Supabase insert result for assistant image:', { imageMsg, imageErr });
+                if (!imageErr && imageMsg) {
+                  console.log('[handleSendMessage] Inserted assistant image message', imageMsg);
+                  // Force refetch so UI is always up to date
+                  await fetchAndSetMessages(chatId!);
+                }
+                setIsImageGenerating(false); // End loading indicator
+                resolve();
+              },
+              onError: async (err: any) => {
+                console.log('[handleSendMessage] Gemini image API failed', err);
+                console.log('[handleSendMessage] Inserting assistant error message to Supabase', { chatId });
+                const { data: errMsg } = await supabase
+                  .from('messages')
+                  .insert([{ chat_id: chatId!, user_id: user.sub, content: "Sorry, I couldn't generate an image for that prompt.", role: 'assistant', image_base64: null, is_image_prompt: false }])
+                  .select()
+                  .single();
+                console.log('[handleSendMessage] Supabase insert result for assistant error:', { errMsg });
+                if (errMsg) {
+                  console.log('[handleSendMessage] Inserted assistant error message', errMsg);
+                  await fetchAndSetMessages(chatId!);
+                }
+                setIsImageGenerating(false); // End loading indicator
+                resolve();
+              }
+            }
+          );
+        });
+      } catch (err) {
+        console.log('[handleSendMessage] Error generating image:', err);
+      }
+    }
+    // NORMAL TEXT FLOW
     const { data: msgData, error: msgError } = await supabase
       .from('messages')
-      .insert([{ chat_id: chatId, user_id: user.sub, content, role }])
+      .insert([{ chat_id: chatId, user_id: user.sub, content, role, image_base64: imageBase64 ?? null, is_image_prompt: isImagePrompt ?? false }])
       .select()
       .single();
     if (!msgError && msgData) {
@@ -138,6 +242,8 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
       }
     }
   };
+
+
 
   return (
     <div className="position-relative" style={{ minHeight: '100vh', background: '#18181a' }}>
@@ -188,17 +294,34 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
             style={{ width: 320, maxWidth: '85vw', background: '#18181a', zIndex: 2100, boxShadow: '2px 0 16px rgba(0,0,0,0.4)' }}
           >
             {/* Sidebar Header */}
-            <div className="d-flex align-items-center justify-content-between px-3 py-3 border-bottom" style={{ borderColor: '#232325' }}>
-              <span className="fw-bold" style={{ color: '#fff', fontSize: 22 }}>
-                <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="16" fill="#232325"/><path d="M16 7.5c-2.485 0-4.5 2.015-4.5 4.5 0 1.657 1.343 3 3 3h3c1.657 0 3-1.343 3-3 0-2.485-2.015-4.5-4.5-4.5zm0 2c1.38 0 2.5 1.12 2.5 2.5S17.38 14.5 16 14.5 13.5 13.38 13.5 12 14.62 9.5 16 9.5zm-7 10c0-2.21 3.582-4 8-4s8 1.79 8 4v1c0 1.104-.896 2-2 2H11c-1.104 0-2-.896-2-2v-1zm2 0v1h12v-1c0-1.104-3.582-2-8-2s-8 .896-8 2z" fill="#fff"/></svg>
-              </span>
+            <div className="d-flex align-items-center justify-content-end px-3 py-3 border-bottom" style={{ borderColor: '#232325' }}>
+
               <button className="btn btn-link text-white p-2" style={{ border: "none" }} onClick={() => setSidebarOpen(false)}>
                 <X size={24} />
               </button>
             </div>
             {/* Sidebar Content: Chat List */}
             <div className="flex-grow-1 overflow-auto">
-              <button className="btn btn-primary w-100 my-2" onClick={handleNewChat}>+ New Chat</button>
+              <button
+  className="w-100 my-2 fw-semibold"
+  style={{
+    background: '#232325',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '8px',
+    padding: '10px 0',
+    transition: 'background 0.2s',
+    fontSize: '16px',
+    letterSpacing: '0.5px',
+    outline: 'none',
+    cursor: 'pointer',
+  }}
+  onMouseOver={e => (e.currentTarget.style.background = '#34343a')}
+  onMouseOut={e => (e.currentTarget.style.background = '#232325')}
+  onClick={handleNewChat}
+>
+  New Chat
+</button>
               {loadingChats ? (
                 <div className="text-center text-muted py-2">Loading chats...</div>
               ) : (
@@ -254,14 +377,23 @@ export default function ChatGPTMobile({ user, isLoggedIn }: ChatGPTMobileProps) 
         }}
       >
         {isLoggedIn ? (
-          <ChatClient
-            user={user}
-            currentChatId={currentChatId}
-            messages={messages}
-            loading={loadingMessages}
-            onSendMessage={handleSendMessage}
-            isLoggedIn={true}
-          />
+          <>
+            <ChatClient
+              user={user}
+              currentChatId={currentChatId}
+              messages={messages}
+              loading={loadingMessages}
+              onSendMessage={handleSendMessage}
+              isLoggedIn={isLoggedIn}
+            />
+            {isImageGenerating && (
+              <div className="d-flex flex-column w-100 mb-2">
+                <div className="rounded-4 px-4 py-3 w-100 opacity-50" style={{fontSize: '1rem', background: '#26272b', color: '#fff', borderRadius: 18, minHeight: 48}}>
+                  Generating image...
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           <ChatClient isLoggedIn={false} />
         )}
