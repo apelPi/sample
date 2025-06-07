@@ -1,8 +1,11 @@
 "use client";
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { trpc } from '../trpc/client';
-import { Plus, Wrench, Mic, ArrowUp } from "lucide-react";
-import type { Message } from "../lib/types";
+import { Plus, Wrench, Mic, ArrowUp, Image as ImageIcon } from "lucide-react";
+// Extend Message type locally to allow imageBase64 for local (logged-out) image messages
+import type { Message as BaseMessage } from "../lib/types";
+
+type Message = BaseMessage & { imageBase64?: string };
 
 interface ChatClientProps {
     user?: any;
@@ -19,6 +22,8 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
     const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
     const [geminiIsTyping, setGeminiIsTyping] = useState(false);
     const geminiMutation = trpc.gemini.useMutation();
+    const generateImageMutation = trpc.generateImage.useMutation();
+    const [imageMode, setImageMode] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
     const [justCreatedChat, setJustCreatedChat] = useState(false);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -29,25 +34,48 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
         if (!message.trim()) return;
         setMessage("");
         const userMsg: Message = { role: "user", content: message };
+        if (!isLoggedIn && imageMode) {
+            const imagePromptMsg: Message = { ...userMsg, isImagePrompt: true } as Message;
+            setLocalMessages((prev) => [...prev, imagePromptMsg]);
+            setGeminiIsTyping(true);
+            try {
+                const { imageBase64 } = await generateImageMutation.mutateAsync({ prompt: message });
+                setLocalMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: "[image]", imageBase64 }
+                ]);
+            } catch (err) {
+                setLocalMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: "Sorry, I couldn't generate an image for that prompt." }
+                ]);
+            }
+            setGeminiIsTyping(false);
+            setImageMode(false);
+            return;
+        }
+        // Normal text flow
         if (isLoggedIn && onSendMessage) {
             setPendingMessages((prev) => [...prev, userMsg]);
             setGeminiIsTyping(true);
             if (!currentChatId) setJustCreatedChat(true);
             await onSendMessage(message, "user");
+            // Filter out image requests and image responses from context
             const newHistory = [
                 ...(messages ?? []),
                 ...pendingMessages,
                 userMsg
-            ];
+            ].filter(msg => !msg.imageBase64 && msg.content !== "[image]" && !(msg as any).isImagePrompt);
             geminiMutation.mutate({ history: newHistory });
         } else {
             setPendingMessages((prev) => [...prev, userMsg]);
             setGeminiIsTyping(true);
+            // Filter out image requests and image responses from context
             const newHistory = [
                 ...localMessages,
                 ...pendingMessages,
                 userMsg
-            ];
+            ].filter(msg => !msg.imageBase64 && msg.content !== "[image]" && !(msg as any).isImagePrompt);
             geminiMutation.mutate({ history: newHistory });
         }
     };
@@ -158,6 +186,21 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                                     {msg.content}
                                 </div>
                             </div>
+                        ) : msg.imageBase64 ? (
+                            <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
+                                <div
+                                    className="rounded-4 px-4 py-3 w-100 d-flex justify-content-center"
+                                    style={{
+                                        fontSize: '1rem',
+                                        background: '#26272b',
+                                        color: '#fff',
+                                        borderRadius: 18,
+                                        minHeight: 48,
+                                    }}
+                                >
+                                    <img src={`data:image/png;base64,${msg.imageBase64}`} alt="Generated" style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 12 }} />
+                                </div>
+                            </div>
                         ) : (
                             <div key={msg.id ?? idx} className="d-flex flex-column w-100 mb-2">
                                 <div
@@ -178,7 +221,7 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                     {geminiIsTyping && (
                         <div className="d-flex flex-column w-100 mb-2">
                             <div className="rounded-4 px-4 py-3 w-100 opacity-50" style={{fontSize: '1rem', background: '#26272b', color: '#fff', borderRadius: 18, minHeight: 48}}>
-                                Gemini is typing...
+                                {imageMode ? "Generating image..." : "Gemini is typing..."}
                             </div>
                         </div>
                     )}
@@ -200,12 +243,21 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                                 type="text"
                                 value={message}
                                 onChange={(e) => setMessage(e.target.value)}
-                                placeholder="Ask anything"
+                                placeholder={imageMode ? "Describe the image you want..." : "Ask anything"}
                                 className="form-control border-0 bg-transparent text-white flex-grow-1"
                                 style={{ outline: "none", boxShadow: "none", background: 'transparent', fontSize: '1rem' }}
                                 onKeyDown={(e) => { if (e.key === "Enter") handleSend(); }}
-                                disabled={geminiMutation.isPending}
+                                disabled={geminiMutation.isPending || generateImageMutation.isPending}
                             />
+                            <button
+                                className={`btn btn-link p-2 ${imageMode ? 'text-primary' : 'text-muted'}`}
+                                style={{ border: "none" }}
+                                title="Generate Image"
+                                onClick={() => setImageMode((v) => !v)}
+                                disabled={geminiMutation.isPending || generateImageMutation.isPending}
+                            >
+                                <ImageIcon size={20} />
+                            </button>
                             <div className="d-flex align-items-center gap-2 text-muted">
                                 <Wrench size={16} />
                             </div>
