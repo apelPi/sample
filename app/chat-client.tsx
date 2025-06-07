@@ -41,7 +41,6 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
             ];
             geminiMutation.mutate({ history: newHistory });
         } else {
-            setLocalMessages((prev) => [...prev, userMsg]);
             setPendingMessages((prev) => [...prev, userMsg]);
             setGeminiIsTyping(true);
             const newHistory = [
@@ -61,7 +60,11 @@ export default function ChatClient({ user, currentChatId, messages, loading, onS
                 }
             } else {
                 if (geminiMutation.data.response) {
-                    setLocalMessages((prev) => [...prev, { role: "assistant", content: geminiMutation.data.response ?? "" }]);
+                    setLocalMessages((prev) => [
+                        ...prev,
+                        ...pendingMessages,
+                        { role: "assistant", content: geminiMutation.data.response ?? "" }
+                    ]);
                 }
             }
             setPendingMessages([]);

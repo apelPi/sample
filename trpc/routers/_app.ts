@@ -37,6 +37,28 @@ export const appRouter = createTRPCRouter({
       // Return the title as plain text
       return { title: response.text };
     }),
+    generateImage: baseProcedure
+    .input(z.object({ prompt: z.string() }))
+    .mutation(async ({ input }) => {
+      // Call Gemini API for image generation
+      const apiKey = process.env.GEMINI_API_KEY!;
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: input.prompt }] }],
+            generationConfig: { responseModalities: ["Text", "Image"] },
+          }),
+        }
+      );
+      const data = await response.json();
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((p: any) => p.inlineData?.data);
+      if (!imagePart) throw new Error("No image generated");
+      return { imageBase64: imagePart.inlineData.data };
+    }),
 });
 
 export type AppRouter = typeof appRouter; 
